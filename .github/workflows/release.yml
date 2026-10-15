@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.2.1)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Import GPG key
+        env:
+          GPG_KEY_BASE64: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$GPG_KEY_BASE64" ]; then
+            echo "ERROR: GPG_PRIVATE_KEY secret is empty or not set!"
+            exit 1
+          fi
+          
+          echo "Base64 length: ${#GPG_KEY_BASE64} characters"
+          
+          echo "$GPG_KEY_BASE64" | base64 --decode > /tmp/key.asc
+          gpg --batch --import /tmp/key.asc || { echo "Import failed - showing decoded content (first/last lines):"; head -n 5 /tmp/key.asc; tail -n 5 /tmp/key.asc; exit 1; }
+          
+          echo "Imported secret keys:"
+          gpg --list-secret-keys --keyid-format LONG
+          
+          rm -f /tmp/key.asc
+
+      - name: Configure Maven settings
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << EOF
+          <settings>
+            <servers>
+              <server>
+                <id>central</id>                 
+                <username>\${env.MAVEN_CENTRAL_USERNAME}</username>
+                <password>\${env.MAVEN_CENTRAL_PASSWORD}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set release version everywhere (POMs, examples, benchmark, docs)
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+
+          # all modules incl. examples. versions:set also fixes the <parent> refs,
+          # and the examples use ${project.version} so they follow along.
+          mvn -B versions:set -DnewVersion="${VERSION}" \
+            -DprocessAllModules -DgenerateBackupPoms=false
+
+          # benchmark isn't in the reactor (its own version stays 3.2.0), but it
+          # uses the library through this property, so bump that too.
+          sed -i "s#<query-analyzer.version>[0-9]\+\.[0-9]\+\.[0-9]\+</query-analyzer.version>#<query-analyzer.version>${VERSION}</query-analyzer.version>#" \
+            query-analyzer-benchmark/pom.xml
+
+          # version shown in the docs (maven <version> + gradle coord)
+          for f in README.md docs/GETTING_STARTED.md \
+                   query-analyzer-benchmark/CASE_STUDY.md \
+                   query-analyzer-benchmark/CASE_STUDY_MANYTOMANY.md; do
+            [ -f "$f" ] || continue
+            sed -i "s#<version>[0-9]\+\.[0-9]\+\.[0-9]\+</version>#<version>${VERSION}</version>#g" "$f"
+            sed -i "s#query-analyzer-spring-boot-starter:[0-9]\+\.[0-9]\+\.[0-9]\+#query-analyzer-spring-boot-starter:${VERSION}#g" "$f"
+          done
+
+      - name: Build and Test
+        run: mvn -B clean verify
+
+      - name: Publish to Maven Central
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: mvn -B deploy -Prelease -DskipTests -Dgpg.passphrase="${{ secrets.GPG_PASSPHRASE }}"
+
+      # commit the bump back only after deploy succeeds, so main matches Central.
+      # before, the poms got set for the build but were never committed.
+      - name: Commit version bump back to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -u
+          if git diff --staged --quiet; then
+            echo "No version changes to commit."
+          else
+            git commit -m "chore(release): set version to ${{ steps.version.outputs.version }} [skip ci]"
+            git push origin HEAD:refs/heads/main
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: Release ${{ steps.version.outputs.version }}
+          body: |
+            ## Query Analyzer ${{ steps.version.outputs.version }}
+            
+            ### Maven
+            ```xml
+            <dependency>
+                <groupId>io.github.query-analyzer</groupId>
+                <artifactId>query-analyzer-spring-boot-starter</artifactId>
+                <version>${{ steps.version.outputs.version }}</version>
+            </dependency>
+            ```
+            
+            ### Gradle
+            ```gradle
+            implementation 'io.github.query-analyzer:query-analyzer-spring-boot-starter:${{ steps.version.outputs.version }}'
+            ```
+          generate_release_notes: true
