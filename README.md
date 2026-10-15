@@ -11,9 +11,7 @@ Database inefficiencies can cause applications to execute unnecessary SQL querie
 **Backend**
 - Java 17
 - Spring Boot
-- Spring Data JPA and Hibernate
 - Maven
-- H2 Database
 
 **Frontend**
 - React
