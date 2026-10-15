@@ -1,4 +1,4 @@
-# Production-Ready Query Analyzer
+# Database Query Performance Analyzer
 
 A full-stack application built with **Java, Spring Boot, Spring Data JPA, React, and Vite** to demonstrate database query analysis and optimization, including the N+1 query problem.
 
