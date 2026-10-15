@@ -2,10 +2,15 @@
 package io.queryanalyzer.example.controller;
 
 import io.queryanalyzer.example.service.UserService;
+import io.queryanalyzer.core.model.IssueType;
+import io.queryanalyzer.core.storage.IssueStorage;
+import io.queryanalyzer.core.storage.model.StoredIssue;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.Duration;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -14,9 +19,36 @@ import java.util.Map;
 public class AnalyticsController {
 
     private final UserService userService;
+    private final IssueStorage issueStorage;
 
-    public AnalyticsController(UserService userService) {
+    public AnalyticsController(UserService userService, IssueStorage issueStorage) {
         this.userService = userService;
+        this.issueStorage = issueStorage;
+    }
+
+    /** Returns real N+1 findings stored by the analyzer for recently executed requests. */
+    @GetMapping("/issues")
+    public List<Map<String, Object>> getRecentIssues() {
+        return issueStorage.getRecent(Duration.ofHours(24)).stream()
+                .filter(issue -> issue.getType() == IssueType.N_PLUS_ONE)
+                .map(this::toIssueResponse)
+                .toList();
+    }
+
+    private Map<String, Object> toIssueResponse(StoredIssue issue) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", issue.getId());
+        item.put("timestamp", issue.getTimestamp());
+        item.put("endpoint", issue.getEndpoint());
+        item.put("httpMethod", issue.getHttpMethod());
+        item.put("type", issue.getType().name());
+        item.put("severity", issue.getSeverity().name());
+        item.put("description", issue.getDescription());
+        item.put("queryCount", issue.getQueryCount());
+        item.put("executionTimeMs", issue.getExecutionTimeMs());
+        item.put("sampleQuery", issue.getSampleQuery());
+        item.put("location", issue.getLocation());
+        return item;
     }
 
     @GetMapping("/comparison")

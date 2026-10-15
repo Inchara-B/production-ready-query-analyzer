@@ -37,6 +37,7 @@ export default function App() {
   const [activePage, setActivePage] = useState("overview");
 
   const [comparison, setComparison] = useState(null);
+  const [issues, setIssues] = useState([]);
 
   const [loading, setLoading] = useState(false);
 
@@ -69,6 +70,36 @@ export default function App() {
       const data = await response.json();
 
       setComparison(data);
+
+      // The comparison request has now completed, so the analyzer filter has
+      // had a chance to store findings from the SQL executed during that request.
+      const issuesResponse = await fetch(`${API_BASE}/api/analytics/issues`);
+      if (issuesResponse.ok) {
+        const issueData = await issuesResponse.json();
+        // Keep only the repeated child-table queries from the lazy-loading path.
+        // The starter also reports repeated benchmark executions and JOIN FETCH
+        // statements; those alone are not evidence of an N+1 problem.
+        const candidates = (Array.isArray(issueData) ? issueData : []).filter((issue) => {
+          const sql = String(issue.sampleQuery ?? "").toLowerCase();
+          const location = String(issue.location ?? "").toLowerCase();
+          return sql.includes("from orders") &&
+            sql.includes("user_id") &&
+            sql.includes("?") &&
+            location.includes("getalluserswithordersbad");
+        });
+
+        // The comparison endpoint runs repeatedly, so the analyzer may store
+        // the same finding more than once. Display one latest finding per pattern.
+        const uniqueFindings = new Map();
+        for (const issue of candidates) {
+          const key = `${String(issue.sampleQuery ?? "").replace(/\s+/g, " ").trim()}|${issue.location ?? ""}`;
+          const existing = uniqueFindings.get(key);
+          if (!existing || new Date(issue.timestamp ?? 0) > new Date(existing.timestamp ?? 0)) {
+            uniqueFindings.set(key, issue);
+          }
+        }
+        setIssues(Array.from(uniqueFindings.values()));
+      }
 
     } catch {
 
@@ -319,9 +350,9 @@ export default function App() {
 
             label="Detected issue"
 
-            value="N+1"
+            value={issues.length > 0 ? "N+1" : "None"}
 
-            detail="Example analysis finding"
+            detail={issues.length > 0 ? `${issues.length} real finding(s)` : "No stored findings yet"}
 
             tone="orange"
 
@@ -333,9 +364,9 @@ export default function App() {
 
             label="Repeated queries"
 
-            value="10"
+            value={issues.length > 0 ? String(issues[0].queryCount ?? "—") : "—"}
 
-            detail="Orders query example"
+            detail="Queries in latest stored finding"
 
             tone="purple"
 
@@ -363,6 +394,8 @@ export default function App() {
 
           <Overview
 
+            issues={issues}
+
             comparison={comparison}
 
             hasTimings={hasTimings}
@@ -383,7 +416,7 @@ export default function App() {
 
         {activePage === "analysis" && (
 
-          <AnalysisPage onNavigate={setActivePage} />
+          <AnalysisPage issues={issues} onNavigate={setActivePage} />
 
         )}
 
@@ -459,6 +492,8 @@ function MetricCard({ icon, label, value, detail, tone }) {
 
 function Overview({
 
+  issues,
+
   comparison,
 
   hasTimings,
@@ -489,7 +524,7 @@ function Overview({
 
           </div>
 
-          <span className="issue-badge">N+1 detected</span>
+          <span className="issue-badge">{issues.length > 0 ? "N+1 detected" : "No stored findings"}</span>
 
         </div>
 
@@ -501,13 +536,13 @@ function Overview({
 
           <div>
 
-            <strong>Repeated orders queries</strong>
+            <strong>{issues[0]?.description ?? "No N+1 finding returned by the analyzer"}</strong>
 
-            <p>Relationship: users → orders</p>
+            <p>{issues[0] ? `Endpoint: ${issues[0].httpMethod ?? ""} ${issues[0].endpoint ?? ""}` : "Run the comparison and refresh to collect analyzer findings."}</p>
 
           </div>
 
-          <span className="severity">Warning</span>
+          <span className="severity">{issues[0]?.severity ?? "—"}</span>
 
         </div>
 
@@ -519,7 +554,7 @@ function Overview({
 
             <span>Repeated queries</span>
 
-            <strong>10</strong>
+            <strong>{issues[0]?.queryCount ?? "—"}</strong>
 
           </div>
 
@@ -527,7 +562,7 @@ function Overview({
 
             <span>Recommended approach</span>
 
-            <strong>JOIN FETCH</strong>
+            <strong>{issues.length > 0 ? "JOIN FETCH" : "—"}</strong>
 
           </div>
 
@@ -738,13 +773,7 @@ function Overview({
           </div>
 
           <p>
-
-            {comparison
-
-              ? "Calculated from the latest comparison API response."
-
-              : "Refresh after starting the backend to load timing data."}
-
+            {issues.length > 0 ? "Findings are read from the backend analyzer storage." : "No N+1 findings are currently stored for the last 24 hours."}
           </p>
 
         </div>
@@ -819,7 +848,7 @@ function Endpoint({ method, path, description }) {
 
 
 
-function AnalysisPage({ onNavigate }) {
+function AnalysisPage({ issues, onNavigate }) {
 
   return (
 
@@ -837,7 +866,7 @@ function AnalysisPage({ onNavigate }) {
 
           </div>
 
-          <span className="issue-badge">Example finding</span>
+          <span className="issue-badge">{issues.length > 0 ? `${issues.length} stored finding(s)` : "No stored findings"}</span>
 
         </div>
 
@@ -889,6 +918,25 @@ function AnalysisPage({ onNavigate }) {
 
 
 
+        <h3 className="subheading">Recent detector findings</h3>
+        {issues.length === 0 ? (
+          <p className="muted-note">No stored N+1 findings returned by the backend yet.</p>
+        ) : (
+          <div className="fix-list">
+            {issues.map((issue) => (
+              <div key={issue.id}>
+                <span>!</span>
+                <div>
+                  <strong>{issue.severity} · {issue.endpoint}</strong>
+                  <p>{issue.description}</p>
+                  <p>Queries: {issue.queryCount} · {issue.executionTimeMs} ms</p>
+                  {issue.sampleQuery && <code>{issue.sampleQuery}</code>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <h3 className="subheading">Suggested fixes</h3>
 
         <div className="fix-list">
@@ -939,9 +987,7 @@ function AnalysisPage({ onNavigate }) {
 
         <p className="muted-note">
 
-          These are the example findings shown by this project. Actual
-
-          results depend on the endpoint and queries executed.
+          {issues.length > 0 ? "These findings were returned by the backend analyzer storage. Review the endpoint, severity, and sample SQL below." : "No N+1 findings are currently stored. Refresh the dashboard to run the comparison and let the analyzer process the SQL queries."}
 
         </p>
 
